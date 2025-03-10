@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Multimodalstreaming</string>
+    <string name="project_media_permission_description">This app requires access to share the screen for streaming purposes.</string>
 </resources>

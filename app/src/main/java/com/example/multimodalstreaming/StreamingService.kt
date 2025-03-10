@@ -1,52 +1,55 @@
+// StreamingService.kt
 package com.example.multimodalstreaming
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Parcelable // Import Parcelable
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.lifecycleScope
-import android.Manifest
 
 class StreamingService : LifecycleService() {
+
     companion object {
         private const val TAG = "StreamingService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "MultimodalStreamingChannel"
         private const val CHANNEL_NAME = "Multimodal Streaming Service"
 
-        // Service actions
         const val ACTION_START = "com.example.multimodalstreaming.START"
         const val ACTION_STOP = "com.example.multimodalstreaming.STOP"
         const val ACTION_TOGGLE_MIC = "com.example.multimodalstreaming.TOGGLE_MIC"
         const val ACTION_TOGGLE_CAMERA = "com.example.multimodalstreaming.TOGGLE_CAMERA"
+        const val ACTION_START_SCREEN_CAPTURE = "com.example.multimodalstreaming.START_SCREEN_CAPTURE"
 
-        // Extra keys
         const val EXTRA_API_KEY = "api_key"
+        const val EXTRA_MEDIA_PROJECTION_RESULT_CODE = "media_projection_result_code"
+        const val EXTRA_MEDIA_PROJECTION_DATA = "media_projection_data"
     }
 
     private lateinit var webSocketClient: WebSocketClient
-    private var audioRecorder: AudioRecorder? = null // Make nullable
+    private var audioRecorder: AudioRecorder? = null
     private lateinit var audioPlayer: AudioPlayer
 
-    // Use LiveData for better integration with Android ViewModel
     private val _serviceState = MutableLiveData(ServiceState())
     val serviceState: LiveData<ServiceState> = _serviceState
 
     private var isServiceRunning = false
     private var apiKey: String? = null
+    private var mediaProjection: MediaProjection? = null
 
-    // Binder for client interaction
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
@@ -67,33 +70,89 @@ class StreamingService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        Log.d(TAG, "onStartCommand: intent=$intent, flags=$flags, startId=$startId")
 
         when (intent?.action) {
-            ACTION_START -> {
-                apiKey = intent.getStringExtra(EXTRA_API_KEY)
-                if (apiKey.isNullOrEmpty()) {
-                    Log.e(TAG, "API key is required")
+            ACTION_START -> { // Regular start, without MediaProjection
+                if (!isServiceRunning) {
+                    apiKey = intent.getStringExtra(EXTRA_API_KEY)
+                    if (apiKey.isNullOrEmpty()) {
+                        Log.e(TAG, "API key is required")
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                    saveApiKey(apiKey!!)
+
+                    startForegroundService() // Start foreground
+                    setupComponents()
+                    connectWebSocket()
+                    isServiceRunning = true
+                }
+            }
+            ACTION_START_SCREEN_CAPTURE -> { // Start with MediaProjection
+                if (!isServiceRunning) {
+                    apiKey = intent.getStringExtra(EXTRA_API_KEY)
+                    val resultCode = intent.getIntExtra(EXTRA_MEDIA_PROJECTION_RESULT_CODE, -1)
+
+                    // Use the deprecated method and suppress the warning:
+                    @Suppress("DEPRECATION")
+                    val data: Intent? = intent.getParcelableExtra(EXTRA_MEDIA_PROJECTION_DATA)
+
+                    if (apiKey.isNullOrEmpty() || resultCode == -1 || data == null) {
+                        Log.e(TAG, "API key, result code and data are required")
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                    saveApiKey(apiKey!!)
+
+                    startForegroundService() // Start foreground *FIRST*
+                    val mediaProjectionManager =
+                        getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data) // *Then* get MediaProjection
+                    if (mediaProjection == null) {
+                        Log.e(TAG, "Failed to get MediaProjection")
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                    isServiceRunning = true
+                }
+            }
+            ACTION_STOP -> stopMyService()
+            ACTION_TOGGLE_MIC -> toggleMicrophone()
+            ACTION_TOGGLE_CAMERA -> toggleCamera()
+            null -> { // Handle null intent (system restart)
+                Log.i(TAG, "Service restarted by the system with a null intent.")
+                if (isServiceRunning) {
+                    apiKey = loadApiKey()
+                    if (apiKey != null) {
+                        startForegroundService()
+                        setupComponents()
+                        connectWebSocket()
+                    } else {
+                        Log.e(TAG, "API Key is null")
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                } else {
+                    Log.i(TAG, "Service wasn't running on restart")
                     stopSelf()
                     return START_NOT_STICKY
                 }
-
-                startForegroundService()
-                setupComponents()
-                connectWebSocket()
-                isServiceRunning = true
-            }
-            ACTION_STOP -> {
-                stopMyService()
-            }
-            ACTION_TOGGLE_MIC -> {
-                toggleMicrophone()
-            }
-            ACTION_TOGGLE_CAMERA -> {
-                toggleCamera()
             }
         }
 
         return START_STICKY
+    }
+    private fun saveApiKey(apiKey: String) {
+        getSharedPreferences("service_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("api_key", apiKey)
+            .apply()
+    }
+
+    private fun loadApiKey(): String? {
+        return getSharedPreferences("service_prefs", Context.MODE_PRIVATE)
+            .getString("api_key", null)
     }
 
     private fun startForegroundService() {
@@ -110,21 +169,19 @@ class StreamingService : LifecycleService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Multimodal Streaming")
             .setContentText("Service is running")
-            .setSmallIcon(android.R.drawable.ic_dialog_info) // Use a standard icon
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .build()
 
         startForeground(NOTIFICATION_ID, notification)
-
         Log.i(TAG, "Service started in foreground")
     }
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_LOW  // Use IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             )
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
@@ -132,7 +189,7 @@ class StreamingService : LifecycleService() {
     }
 
     private fun setupComponents() {
-        audioPlayer = AudioPlayer(lifecycleScope) // Initialize here
+        audioPlayer = AudioPlayer(lifecycleScope)
         audioPlayer.initialize()
 
         webSocketClient = WebSocketClient(
@@ -147,7 +204,6 @@ class StreamingService : LifecycleService() {
             _serviceState.value = _serviceState.value?.copy(
                 isConnected = state == WebSocketClient.ConnectionState.SETUP_COMPLETE
             )
-
             updateNotification()
         }
 
@@ -168,13 +224,12 @@ class StreamingService : LifecycleService() {
         if (currentState != null) {
             if (currentState.isMicActive) {
                 audioRecorder?.stop()
-                audioRecorder = null //Release for garbage collection
+                audioRecorder = null
                 _serviceState.value = currentState.copy(isMicActive = false)
             } else {
-                //Only instantiate if needed
                 if (audioRecorder == null) {
                     audioRecorder = AudioRecorder(
-                        context = this, // Pass the service context!
+                        context = this,
                         coroutineScope = lifecycleScope,
                         onAudioDataCaptured = { audioData ->
                             webSocketClient.sendAudioData(audioData)
@@ -193,9 +248,6 @@ class StreamingService : LifecycleService() {
         if (currentState != null) {
             val newCameraState = !currentState.isCameraActive
             _serviceState.value = currentState.copy(isCameraActive = newCameraState)
-
-            // Add any camera-specific logic here if needed
-
             updateNotification()
         }
     }
@@ -219,7 +271,6 @@ class StreamingService : LifecycleService() {
             Log.e(TAG, "WebSocketClient not initialized")
         }
     }
-
     private fun updateNotification() {
         val currentState = _serviceState.value ?: return
 
@@ -238,41 +289,28 @@ class StreamingService : LifecycleService() {
     }
 
     private fun stopMyService() {
-        audioRecorder?.stop() // Stop if active
+        Log.i(TAG, "Stopping service...")
+        audioRecorder?.stop()
         audioRecorder = null
-
+        mediaProjection?.stop()
+        mediaProjection = null
 
         if (::webSocketClient.isInitialized) {
             webSocketClient.disconnect()
         }
-
         if (::audioPlayer.isInitialized) {
             audioPlayer.release()
         }
 
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        }
-        else{
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-        }
-
-
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         isServiceRunning = false
-
         Log.i(TAG, "Service stopped")
     }
 
     override fun onDestroy() {
-        if(isServiceRunning){
-            stopMyService()
-        }
         super.onDestroy()
         Log.i(TAG, "Service destroyed")
-
     }
 
     override fun onBind(intent: Intent): IBinder {

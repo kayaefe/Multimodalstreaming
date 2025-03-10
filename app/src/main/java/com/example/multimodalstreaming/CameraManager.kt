@@ -1,3 +1,5 @@
+// app/src/main/java/com/example/multimodalstreaming/CameraManager.kt
+
 package com.example.multimodalstreaming
 
 import android.content.Context
@@ -124,10 +126,11 @@ class CameraManager(
                         Log.e(TAG, "Error processing image", e)
                     } finally {
                         imageProxy.close() // Always close the image proxy
+                        // Remove this analyzer to prevent continuous callbacks
+                        imageAnalysis?.clearAnalyzer()
                     }
                 }
-                // Remove this analyzer to prevent continuous callbacks
-                imageAnalysis?.clearAnalyzer()
+
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error capturing frame", e)

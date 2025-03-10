@@ -2,15 +2,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.multimodalstreaming">
 
+    <!-- Custom defined permission (Optional, for MediaProjection)-->
+    <permission android:name="com.example.multimodalstreaming.project_media"
+        android:label="Project Media"
+        android:description="@string/project_media_permission_description"
+        android:protectionLevel="normal"/>
+
     <!-- Required permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-feature android:name="android.permission.CAMERA" android:required="false" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!--<uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- For Android 10+ screen capture -->
+    <!-- For Android 14+ screen capture (MediaProjection) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="com.example.multimodalstreaming.project_media" />
+
+    <!-- For Android 14+ microphone foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />  <!-- ADD THIS -->
+
 
     <application
         android:allowBackup="true"
@@ -31,7 +43,9 @@
 
         <service
             android:name=".StreamingService"
-            android:foregroundServiceType="mediaProjection" />
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
     </application>
 
 </manifest>

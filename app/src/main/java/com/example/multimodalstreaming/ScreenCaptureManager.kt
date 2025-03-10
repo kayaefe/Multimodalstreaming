@@ -1,3 +1,4 @@
+// ScreenCaptureManager.kt
 package com.example.multimodalstreaming
 
 import android.app.Activity
@@ -16,7 +17,6 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
-import androidx.activity.result.ActivityResultLauncher
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -54,7 +54,6 @@ class ScreenCaptureManager(
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getMetrics(metrics)
 
-        // Reduce resolution for efficiency
         screenWidth = (metrics.widthPixels * 0.5).toInt()
         screenHeight = (metrics.heightPixels * 0.5).toInt()
         screenDensity = metrics.densityDpi

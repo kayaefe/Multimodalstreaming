@@ -1,9 +1,15 @@
+// MainActivity.kt
 package com.example.multimodalstreaming
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.widget.CompoundButton
+import android.os.IBinder
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -14,7 +20,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.multimodalstreaming.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
-import android.util.Log
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -33,17 +38,51 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraManager: CameraManager? = null
     private var screenCaptureManager: ScreenCaptureManager? = null
+    private var streamingService: StreamingService? = null
+    private var isBound = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            val binder = service as StreamingService.LocalBinder
+            streamingService = binder.getService()
+            isBound = true
+            viewModel.setServiceConnected() // Notify ViewModel
+            observeService()
+            Log.i(TAG, "Service connected")
+        }
+
+        override fun onServiceDisconnected(arg0: ComponentName) {
+            isBound = false
+            streamingService = null
+            viewModel.setServiceDisconnected() // Notify ViewModel
+            Log.i(TAG, "Service Disconnected")
+        }
+
+        override fun onBindingDied(name: ComponentName?) {
+            super.onBindingDied(name)
+            Log.i(TAG, "Service binding died")
+            isBound = false
+            streamingService = null
+            viewModel.setServiceDisconnected()
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            super.onNullBinding(name)
+            Log.i(TAG, "Service null binding")
+            isBound = false
+            streamingService = null
+            viewModel.setServiceDisconnected()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Request only the "dangerous" permissions at startup
         if (!allPermissionsGranted()) {
             requestPermissions()
         } else {
-            // Permissions are already granted, proceed with setup
             setupManagersAndUI()
         }
     }
@@ -55,6 +94,22 @@ class MainActivity : AppCompatActivity() {
         observeViewModel()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (allPermissionsGranted()) {
+            val serviceIntent = Intent(this, StreamingService::class.java)
+            bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE) // Bind, but don't *start*
+        } // The foreground service will be started either by btnConnect OR screenCapturePermissionLauncher
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isBound) {
+            unbindService(serviceConnection)
+            isBound = false
+            streamingService = null // Important to avoid leaks
+        }
+    }
 
     private fun setupCameraManager() {
         cameraManager = CameraManager(
@@ -89,6 +144,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupUI() {
         binding.btnConnect.setOnClickListener {
             viewModel.connect()
+            val serviceIntent = Intent(this, StreamingService::class.java).apply {
+                action = StreamingService.ACTION_START // Regular start, no MediaProjection needed yet
+                putExtra(StreamingService.EXTRA_API_KEY, MainViewModel.API_KEY)  // Pass API key here
+            }
+            startForegroundService(serviceIntent)
         }
 
         binding.btnDisconnect.setOnClickListener {
@@ -96,7 +156,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnMicrophone.setOnClickListener {
-            viewModel.toggleMicrophone()
+            streamingService?.toggleMicrophone() // Directly call service methods
         }
 
         binding.btnCamera.setOnClickListener {
@@ -118,24 +178,29 @@ class MainActivity : AppCompatActivity() {
                 viewModel.stopScreenCapture()
                 screenCaptureManager?.stopCapturing()
                 binding.btnScreenCapture.text = "Start Screen Capture"
+                // Stop the foreground service when screen capture is stopped.
+                val serviceIntent = Intent(this, StreamingService::class.java).apply {
+                    action = StreamingService.ACTION_STOP
+                }
+                stopService(serviceIntent) // Stop, don't just unbind.
+
             } else {
-                viewModel.startScreenCapture()
-                // Request screen capture permission using MediaProjectionManager
+                // Request screen capture permission.
                 val captureIntent = screenCaptureManager?.createCaptureIntent()
                 if (captureIntent != null) {
-                    screenCapturePermissionLauncher.launch(captureIntent) // This handles the permission
+                    screenCapturePermissionLauncher.launch(captureIntent)
                 } else {
                     Toast.makeText(this, "Could not create screen capture intent", Toast.LENGTH_SHORT).show()
                 }
-                binding.btnScreenCapture.text = "Stop Screen Capture"
             }
         }
 
         binding.btnSendMessage.setOnClickListener {
             val text = binding.etMessage.text.toString()
-            viewModel.sendMessage(text)
+            streamingService?.sendTextMessage(text)  // Directly call service methods
             binding.etMessage.setText("")
         }
+
         binding.btnSwitchCamera.setOnClickListener {
             viewModel.switchCamera()
         }
@@ -157,7 +222,7 @@ class MainActivity : AppCompatActivity() {
                 MainViewModel.ConnectionState.CONNECTING -> {
                     binding.statusText.text = "Connecting..."
                     binding.btnConnect.isEnabled = false
-                    binding.btnDisconnect.isEnabled = true
+                    binding.btnDisconnect.isEnabled = true // Keep disconnect enabled
                     binding.btnSwitchCamera.isEnabled = false
                 }
                 MainViewModel.ConnectionState.CONNECTED -> {
@@ -173,6 +238,7 @@ class MainActivity : AppCompatActivity() {
                 MainViewModel.ConnectionState.FAILED -> {
                     binding.statusText.text = "Connection Failed"
                     binding.btnConnect.isEnabled = true
+                    binding.btnDisconnect.isEnabled = false // Disable disconnect if failed
                     binding.btnSwitchCamera.isEnabled = false
                 }
             }
@@ -201,10 +267,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun observeService() {
+        streamingService?.let { service ->
+            service.serviceState.observe(this) { state ->
+                viewModel.updateFromServiceState(state) // Update ViewModel
+            }
+        }
+    }
 
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
     }
+
 
     private fun requestPermissions() {
         ActivityCompat.requestPermissions(
@@ -216,7 +290,6 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (allPermissionsGranted()) {
-                // All "dangerous" permissions granted, proceed with setup
                 setupManagersAndUI()
             } else {
                 Toast.makeText(
@@ -231,15 +304,32 @@ class MainActivity : AppCompatActivity() {
 
     private val screenCapturePermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
+            // NOW we have the implicit permission.  Start the service.
+            viewModel.startScreenCapture() // Set the flag
+            val serviceIntent = Intent(this, StreamingService::class.java).apply {
+                action = StreamingService.ACTION_START_SCREEN_CAPTURE
+                putExtra(StreamingService.EXTRA_API_KEY, MainViewModel.API_KEY)
+                putExtra(StreamingService.EXTRA_MEDIA_PROJECTION_RESULT_CODE, result.resultCode)
+                putExtra(StreamingService.EXTRA_MEDIA_PROJECTION_DATA, result.data)
+            }
+            startForegroundService(serviceIntent) // Start foreground *after* permission
+
             screenCaptureManager?.onActivityResult(result.resultCode, result.data)
+            binding.btnScreenCapture.text = "Stop Screen Capture"
+
         } else {
             viewModel.stopScreenCapture()
             Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
+            binding.btnScreenCapture.text = "Start Screen Capture"
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        if (isBound) {
+            unbindService(serviceConnection)
+            isBound = false
+        }
         cameraManager?.cleanup()
     }
 }
